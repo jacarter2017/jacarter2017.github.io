@@ -1,0 +1,153 @@
+---
+title: "Public Housing in Minnesota"
+author: "Jamie Carter"
+date: "August 28, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE, message=FALSE,warnings=FALSE}
+#get the public housing data here https://egis-hud.opendata.arcgis.com/datasets/52a6a3a2ef1e4489837f97dcedaf8e27_0: it's massive so I couldn't bring it in.
+library(ggplot2)
+library(sf)
+library(censusapi)
+library(leaflet)
+library(dplyr)
+library(tidycensus)
+library(tidyr)
+library(ggthemes)
+public_housing_location<-"Public_Housing_Buildings.shp"
+public_housing<-st_read(public_housing_location)
+public_housing_mn<-public_housing %>% 
+  filter(STATE2KX=="27") %>% 
+  rename("county"=CURCNTY)
+units<-public_housing_mn %>% 
+  group_by(county) %>% 
+  summarize(units=sum(ACC_UNITS))
+
+census_api_key("b90c6af10bf4ee9b571c1693742935f92f071bbf")
+
+poverty_ratiovars<-c("C17002_002E","C17002_003E","C17002_004E",
+                     "C17002_005E","C17002_006E",
+                     "C17002_007E","C17002_008E")
+
+mn_lowincome<-get_acs(geography="county",year=2016,variables=poverty_ratiovars,
+                   state="MN",geometry = T)
+mn_lowincome<-mn_lowincome %>% 
+  mutate(variable=ifelse(variable=="C17002_002","Under 50%",
+                ifelse(variable=="C17002_003","50% to 99%",
+                       ifelse(variable=="C17002_004","100% to 124%",
+                              ifelse(variable=="C17002_005","125% to 149%",
+                                     ifelse(variable=="C17002_006","150% to 184%",
+                                            ifelse(variable=="C17002_007","185% to 199%", ifelse(variable=="C17002_008","200% and above","what?"))))))))
+
+mn_lowincome<- mn_lowincome %>% 
+  select(GEOID,NAME,variable,estimate,geometry) %>% 
+  spread(key="variable",
+         value="estimate") %>% 
+  mutate(`Below poverty line`=`Under 50%`+`50% to 99%`) 
+mn_lowincome<-mn_lowincome %>% 
+  st_transform(crs=st_crs(units))
+
+public_housing_mn_units<-st_join(mn_lowincome,units)
+
+public_housing_county_units<-public_housing_mn_units %>%
+  select(NAME,`Below poverty line`,county,units,GEOID,geometry) %>% 
+  mutate(per_unit=ifelse(!is.na(units),`Below poverty line`/units,0))
+
+```
+#Distribution of people per public housing unit in Minnesota counties
+##It appears that some areas of Minnesota have a large number of people living below the poverty line relative to the public housing available in their county.This doesn't say much about whether they have accessibility to cheaper housing, however, as Section 8 and LIHTC properties are not included in this analysis. It's quick and dirty, but it is interesting. 
+```{r ggplot distribution,echo=FALSE}
+ggplot(public_housing_county_units,aes(x=per_unit))+
+  geom_histogram(bins=40)+
+  theme_tufte()+
+  labs(title="Number of people below the poverty line per public housing unit in MN counties")
+```
+
+```{r palette/popup, echo=FALSE,include=FALSE}
+pal_mn<-colorNumeric("Reds",domain=public_housing_county_units$per_unit)
+popup_mn<-paste0("<strong>",public_housing_county_units$NAME.x,
+                 "</strong><br />Total number of people below the poverty line: ",
+                 public_housing_county_units$`Below poverty line`,
+                 "<br />Number of people below the poverty line per unit: ",
+                 as.character(round(public_housing_county_units$per_unit,0)))
+
+```
+#People below the poverty line versus public housing units in Minnesota
+##It appears that Sherburne and Anoka Counties are the worst offenders. For reference, these counties lie directly North of Minneapolis/St. Paul. I wonder what these Anoka County looks like up close?
+```{r leaflet plot, echo=FALSE}
+leaflet() %>% 
+  addProviderTiles(providers$CartoDB.Positron) %>% 
+  setView(-94.6859,46.7296, zoom = 6) %>% 
+  addPolygons(data=public_housing_county_units,
+              fillColor = ~pal_mn(public_housing_county_units$per_unit),
+              fillOpacity = .9,
+              weight=.2,
+              smoothFactor=.2,
+              popup=~popup_mn) %>% 
+  addLegend(pal=pal_mn,
+            values=public_housing_county_units$per_unit,
+            position="bottomright",
+            title="People per public housing unit")
+```
+
+```{r prepare anoka county, message=FALSE, warnings=FALSE, echo=FALSE,warning=FALSE,include=FALSE}
+mn_lowincome<-get_acs(geography="tract",year=2016,variables=poverty_ratiovars,
+                   state="MN",geometry = T)
+mn_lowincome<-mn_lowincome %>% 
+  mutate(variable=ifelse(variable=="C17002_002","Under 50%",
+                ifelse(variable=="C17002_003","50% to 99%",
+                       ifelse(variable=="C17002_004","100% to 124%",
+                              ifelse(variable=="C17002_005","125% to 149%",
+                                     ifelse(variable=="C17002_006","150% to 184%",
+                                            ifelse(variable=="C17002_007","185% to 199%", ifelse(variable=="C17002_008","200% and above","what?"))))))))
+
+mn_lowincome$county<-substring(mn_lowincome$GEOID,1,nchar(mn_lowincome$GEOID)-6)
+mn_lowincome$county<-substring(mn_lowincome$county,3)
+
+Anoka_lowincome<- mn_lowincome %>% 
+  select(GEOID,NAME,variable,estimate,geometry,county) %>% 
+  filter(county=="003") %>% 
+  spread(key="variable",
+         value="estimate") %>% 
+  mutate(`Below poverty line`=`Under 50%`+`50% to 99%`) %>% 
+  st_transform(crs=st_crs(units))
+
+public_housing_Anoka<-public_housing_mn %>% 
+  filter(county=="003") %>% 
+  filter(ACC_UNITS>0)
+
+Anoka_lowincome<-st_join(Anoka_lowincome,public_housing_Anoka)
+
+```
+#Anoka county by income levels and the location of their public housing buildings, by census tract
+##Looks like the poorest areas are far South, and further it looks like there are only two buildings in the entire county. Next steps would be to look into Section 8 and LIHTC housing, as well as homeownership rates. 
+```{r palette/popup2, echo=FALSE,include=FALSE, message=FALSE, warnings=FALSE}
+pal_mn<-colorNumeric("Reds",domain=Anoka_lowincome$`Below poverty line`)
+popup_mn<-paste0("<strong>",Anoka_lowincome$NAME,
+                 "</strong><br />Total number of people below the poverty line: ",
+                 Anoka_lowincome$`Below poverty line`)
+popup_anoka<-paste0("Public housing building")
+
+```
+
+```{r leaflet plot2, echo=FALSE}
+leaflet() %>% 
+  addProviderTiles(providers$CartoDB.Positron) %>% 
+  setView(-93.2197,45.3293, zoom = 10) %>% 
+  addPolygons(data=Anoka_lowincome,
+              fillColor = ~pal_mn(Anoka_lowincome$`Below poverty line`),
+              fillOpacity = .9,
+              weight=.2,
+              smoothFactor=.2,
+              popup=~popup_mn) %>% 
+  addMarkers(data=public_housing_Anoka,
+              popup=popup_anoka) %>% 
+  addLegend(pal=pal_mn,
+            values=Anoka_lowincome$`Below poverty line`,
+            position="bottomright",
+            title="People below the poverty line in Anoka County")
+
+```
+
+
